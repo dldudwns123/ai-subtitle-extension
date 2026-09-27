@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "AI 실시간 발음 자막",
+  "version": "1.0.0",
+  "description": "동영상 음성을 분석하여 한글 발음 자막을 제공합니다.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "http://localhost:5000/*"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}
