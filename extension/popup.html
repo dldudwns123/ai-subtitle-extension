@@ -7,25 +7,48 @@
     body {
       width: 220px;
       padding: 15px;
-      font-family: Arial, sans-serif;
+      font-family: 'Malgun Gothic', Arial, sans-serif;
     }
     h3 {
       margin-top: 0;
       font-size: 16px;
       color: #333;
+      border-bottom: 2px solid #eee;
+      padding-bottom: 8px;
     }
-    .toggle-container {
+    .toggle-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .toggle-item {
       display: flex;
       align-items: center;
       justify-content: space-between;
+      font-size: 14px;
     }
   </style>
 </head>
 <body>
-  <h3>AI 발음 자막</h3>
-  <div class="toggle-container">
-    <span>자막 표시</span>
-    <input type="checkbox" id="toggleSubtitle" checked>
+  <h3>AI 자막 설정</h3>
+  <div class="toggle-group">
+    <div class="toggle-item">
+      <span>전체 자막 표시</span>
+      <input type="checkbox" id="toggleSubtitle" checked>
+    </div>
+    <hr style="border: 0; border-top: 1px solid #eee; margin: 4px 0;">
+    <div class="toggle-item">
+      <span>외국어 원문</span>
+      <input type="checkbox" id="toggleOriginal" checked>
+    </div>
+    <div class="toggle-item">
+      <span>한글 발음</span>
+      <input type="checkbox" id="togglePronunciation" checked>
+    </div>
+    <div class="toggle-item">
+      <span>한글 번역</span>
+      <input type="checkbox" id="toggleTranslation" checked>
+    </div>
   </div>
   <script src="popup.js"></script>
 </body>
