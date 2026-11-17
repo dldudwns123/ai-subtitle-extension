@@ -4,8 +4,7 @@
   "version": "1.0.0",
   "description": "동영상 음성을 분석하여 한글 발음 자막을 제공합니다.",
   "permissions": [
-    "activeTab",
-    "scripting"
+    "activeTab"
   ],
   "host_permissions": [
     "https://www.youtube.com/*",

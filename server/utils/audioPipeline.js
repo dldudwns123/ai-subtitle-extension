@@ -13,7 +13,9 @@ async function downloadAudio(videoUrl, outputFileName) {
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
     const outputPath = path.join(tempDir, `${outputFileName}.mp3`);
-    const ytDlpPath = path.join(__dirname, '../yt-dlp.exe');
+    // 변경 후 (Windows와 Linux 클라우드 서버 모두 호환):
+    const ytDlpBinary = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
+    const ytDlpPath = path.join(__dirname, '..', ytDlpBinary);
 
     const args = [
       '--no-playlist',
@@ -53,77 +55,132 @@ async function downloadAudio(videoUrl, outputFileName) {
   });
 }
 
-// OpenAI Whisper STT + GPT-4o-mini 다국어(일본어 포함) 한글 발음 및 번역 파이프라인
-async function processAudioToSubtitle(audioPath) {
-  console.log('[OpenAI Whisper 정밀 음성 인식 처리 중...]');
+// OpenAI Whisper STT + GPT-4o-mini ID 기반 1:1 정밀 다국어 연음 매핑 파이프라인
+// targetLang: 'ko' (한글), 'en' (영어 알파벳/Romaji), 'ja' (일본어 가타카나)
+async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
+  console.log(`[OpenAI Whisper 정밀 음성/단어 타임스탬프 추출 중... (발음 언어: ${targetLang})]`);
   
-  // 1. Whisper API 타임스탬프 파싱
+  // 1. Whisper API로 세그먼트 및 단어(word) 단위 타임스탬프 동시 파싱
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: 'whisper-1',
     response_format: 'verbose_json',
-    timestamp_granularities: ['segment']
+    timestamp_granularities: ['segment', 'word']
   });
 
   const segments = transcription.segments || [];
+  const words = transcription.words || [];
+
   if (segments.length === 0) return [];
 
-  console.log('[GPT-4o-mini 다국어 한글 연음 발음 및 뜻 번역 생성 중...]');
-  const originalTexts = segments.map((s) => s.text);
+  console.log(`[GPT-4o-mini ID 매핑 기반 (${targetLang}) 연음 발음 및 뜻 번역 생성 중...]`);
+  
+  // 각 세그먼트에 고유 ID와 포함된 단어 묶음을 부여하여 GPT로 전송
+  const inputItems = segments.map((s, index) => {
+    const segWords = words.filter(w => w.start >= s.start - 0.15 && w.end <= s.end + 0.15);
+    return {
+      id: index,
+      text: s.text.trim(),
+      words: segWords.map(w => w.word.trim())
+    };
+  });
 
-  // 2. GPT-4o-mini로 들리는 발음과 자연스러운 번역 일괄 생성
+  // targetLang별 프롬프트 발음 규칙 동적 설정
+  let langInstruction = '';
+  if (targetLang === 'en') {
+    langInstruction = `
+2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 '영어 알파벳(Phonetic / Romaji)'으로 표기하라.
+   - 예시: "始めから" -> pronunciation: "(Hajimekara)", pronunciationWords: ["Hajime", "kara"]
+   - 예시: "over that" -> pronunciation: "(Over-day)", pronunciationWords: ["Over", "day"]`;
+  } else if (targetLang === 'ja') {
+    langInstruction = `
+2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 '일본어 가타카나(Katakana)'로 표기하라.
+   - 예시: "over that" -> pronunciation: "(オーバー・デイ)", pronunciationWords: ["オーバー", "デイ"]
+   - 예시: "falling down" -> pronunciation: "(フォーリング・ダウン)", pronunciationWords: ["フォーリング", "ダウン"]`;
+  } else {
+    // 기본 한글 발음 ('ko')
+    langInstruction = `
+2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 오직 '한글(한국어 글자)'로만 작성하라. (원문의 알파벳, 한자, 히라가나 등 외래문자를 단 한 글자도 포함하지 마라)
+   - 예시: "始めから" -> pronunciation: "(하지메카라)", pronunciationWords: ["하지메", "카라"]
+   - 예시: "over that" -> pronunciation: "(오버데)", pronunciationWords: ["오버", "데"]`;
+  }
+
+  // 2. GPT-4o-mini로 ID 기반 1:1 정밀 매핑 및 단어 발음 생성
   const gptResponse = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
       {
         role: 'system',
-        content: `외국어(영어, 일본어, 중국어 등) 문장 배열을 받아 각 요소별로 1) 실제 청각 소리 그대로의 한글 발음, 2) 자연스러운 한국어 뜻 번역을 포함하는 동일한 크기의 JSON 배열로 반환해줘.
+        content: `외국어 가사 목록(id, text, words)을 받아 각 id에 1:1로 정확히 대응되는 1) 연음 발음(pronunciation), 2) 단어별 연음 배열(pronunciationWords), 3) 한국어 뜻 번역(translation)을 JSON 구조로 반환해줘.
 
-[핵심 발음 규칙]
-1. pronunciation 항목은 무조건 소리 나는 대로 오직 '한글(한국어 글자)'로만 작성하라. (절대 원문의 알파벳, 한자, 히라가나, 카타카나를 포함하지 마라)
-2. 일본어 처리 예시:
-   - 원문: "始めからやり直せたら" -> pronunciation: "(하지메카라 야리나오세타라)"
-   - 원문: "愛してる" -> pronunciation: "(아이시테루)"
-3. 영어 처리 예시:
-   - 가수의 실제 연음/억양 소리 그대로 표기 (예: "over that" -> "(오버데)")
-4. translation: 문장의 자연스러운 한국어 뜻 번역
+[절대 준수 규칙 - ID 매핑 & 발음 표기 강제]
+1. 입력받은 모든 id 항목을 단 하나도 생략하거나 합치지 말고, 동일한 id를 부여하여 "result" 배열에 담아 응답하라.
+${langInstruction}
+3. pronunciationWords: 원문의 words 배열 단어 개수 및 순서에 1:1 대응하는 소리 나는 대로의 발음 단어 배열
+4. translation: 해당 문장의 자연스러운 한국어 뜻 번역
 
 응답 형식 예시:
-[
-  {
-    "pronunciation": "(하지메카라 야리나오세타라)",
-    "translation": "처음부터 다시 시작할 수 있다면"
-  }
-]`
+{
+  "result": [
+    {
+      "id": 0,
+      "pronunciation": "(앤드 유얼 비 온 더 월스 오브 더 홀 오브 페임)",
+      "pronunciationWords": ["앤드", "유얼", "비", "온", "더", "월스", "오브", "더", "홀", "오브", "페임"],
+      "translation": "너는 명예의 전당의 벽에 새겨질 거야"
+    }
+  ]
+}`
       },
       {
         role: 'user',
-        content: JSON.stringify(originalTexts)
+        content: JSON.stringify(inputItems)
       }
     ],
     response_format: { type: "json_object" }
   });
 
-  let parsedResults = [];
+  let resultMap = {};
   try {
     const rawContent = gptResponse.choices[0].message.content.trim();
-    const jsonParsed = JSON.parse(rawContent);
-    parsedResults = Array.isArray(jsonParsed) ? jsonParsed : (jsonParsed.result || jsonParsed.items || []);
+    const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+    const jsonParsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawContent);
+    const items = Array.isArray(jsonParsed) ? jsonParsed : (jsonParsed.result || jsonParsed.items || []);
+    
+    // ID 기반 결과 딕셔너리 안전 구성
+    items.forEach((item) => {
+      if (item && item.id !== undefined) {
+        resultMap[item.id] = item;
+      }
+    });
   } catch (e) {
-    parsedResults = originalTexts.map((text) => ({
-      pronunciation: `(${text})`,
-      translation: text
-    }));
+    console.error('GPT 응답 파싱 실패:', e);
   }
 
-  // 3. 타임스탬프 결합 반환
-  return segments.map((seg, idx) => ({
-    start: Number(seg.start.toFixed(2)),
-    end: Number(seg.end.toFixed(2)),
-    text: seg.text,
-    pronunciation: parsedResults[idx]?.pronunciation || `(${seg.text})`,
-    translation: parsedResults[idx]?.translation || seg.text
-  }));
+  // 3. ID를 기준으로 원문 세그먼트와 1:1 밀착 결합하여 반환
+  return segments.map((seg, idx) => {
+    const matched = resultMap[idx] || {};
+    const textClean = seg.text.trim();
+
+    // 단어 단위 정밀 타임스탬프 결합
+    const segWords = words.filter(w => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15);
+    const pronWords = matched.pronunciationWords || [];
+
+    const wordDetails = segWords.map((w, wIdx) => ({
+      word: w.word.trim(),
+      pronunciation: pronWords[wIdx] || w.word.trim(),
+      start: Number(w.start.toFixed(2)),
+      end: Number(segWords[wIdx + 1] ? segWords[wIdx + 1].start.toFixed(2) : w.end.toFixed(2))
+    }));
+
+    return {
+      start: Number(seg.start.toFixed(2)),
+      end: Number(seg.end.toFixed(2)),
+      text: textClean,
+      pronunciation: matched.pronunciation || `(${textClean})`,
+      translation: matched.translation || textClean,
+      words: wordDetails
+    };
+  });
 }
 
 module.exports = {
