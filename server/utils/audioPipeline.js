@@ -124,13 +124,19 @@ async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
   } else if (targetLang === 'ja') {
     langInstruction = `
 2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 연음/억양 소리 그대로 '일본어 가타카나(Katakana)'로 연결해 표기하라.
-   - 예시: "if I" -> pronunciation: "(イファイ)", pronunciationWords: ["イフ", "アイ"]
-   - 예시: "said I" -> pronunciation: "(セダイ)", pronunciationWords: ["セッ", "ダイ"]`;
+   - 예시: "if I" -> pronunciation: "(イファイ)", pronunciationWords: ["イファイ"]
+   - 예시: "said I" -> pronunciation: "(セダイ)", pronunciationWords: ["セダイ"]`;
   } else {
     langInstruction = `
-2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 오직 '한글(한국어 글자)'로만 작성하라. (원문의 알파벳, 한자, 히라가나 등 외래문자를 단 한 글자도 포함하지 마라)
-   - 예시: "始めから" -> pronunciation: "(하지메카라)", pronunciationWords: ["하지메", "카라"]
-   - 예시: "over that" -> pronunciation: "(오버데)", pronunciationWords: ["오버", "데"]`;
+2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 오직 '한글(한국어 글자)'로만 작성하라. (원문의 알파벳, 한자, 히라가나, 가타카나 등 외래문자를 단 한 글자도 포함하지 마라)
+   - 일본어 발음 정밀 규칙:
+     * 'つ'는 반드시 '츠'로 표기('즈' 금지), 'ず/づ'만 '즈'로 표기
+     * 'ちゅ/しゅ/じゅ'는 각각 '츄/슈/쥬'로 표기('추/수/주' 금지)
+     * 한자어는 일본어 실제 독음과 가창 연음을 반영하여 자연스럽게 표기
+     * 예시: "して言うならお都合主義かな流された中継地" -> pronunciation: "(시테 유우 나라 오츠고우슈기 카나 나가사레타 츄우케이치)"
+     * 예시: "始めからやり直せたら" -> pronunciation: "(하지메카라 야리나오세타라)"
+   - 영어 발음 정밀 규칙:
+     * 예시: "over that" -> pronunciation: "(오버데)"`;
   }
 
   const gptResponse = await openai.chat.completions.create({
@@ -143,7 +149,7 @@ async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
 [절대 준수 규칙 - ID 매핑 & 발음 표기 강제]
 1. 입력받은 모든 id 항목을 단 하나도 생략하거나 합치지 말고, 동일한 id를 부여하여 "result" 배열에 담아 응답하라.
 ${langInstruction}
-3. pronunciationWords: 원문의 words 배열 단어 개수 및 순서에 1:1 대응하는 소리 나는 대로의 발음 단어 배열
+3. pronunciationWords: 원문의 words 배열과 1:1 대응하는 발음 단어 배열. 단, 일본어/중국어처럼 원문 words가 한 글자씩 쪼개져 있는 경우에도 절대 원문 글자를 그대로 남기지 말고 전체 문장의 발음을 자연스럽게 분할하라.
 4. translation: 해당 문장의 자연스러운 한국어 뜻 번역
 
 응답 형식 예시:
@@ -151,9 +157,9 @@ ${langInstruction}
   "result": [
     {
       "id": 0,
-      "pronunciation": "(앤드 유얼 비 온 더 월스 오브 더 홀 오브 페임)",
-      "pronunciationWords": ["앤드", "유얼", "비", "온", "더", "월스", "오브", "더", "홀", "오브", "페임"],
-      "translation": "너는 명예의 전당의 벽에 새겨질 거야"
+      "pronunciation": "(시테 유우 나라 오츠고우슈기 카나 나가사레타 츄우케이치)",
+      "pronunciationWords": ["시테", "유우", "나라", "오츠고우슈기", "카나", "나가사레타", "츄우케이치"],
+      "translation": "말한다면 편의주의일까 흘러간 중계지"
     }
   ]
 }`
@@ -186,21 +192,32 @@ ${langInstruction}
     const matched = resultMap[idx] || {};
     const textClean = seg.text.trim();
 
-    const segWords = words.filter(w => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15);
-    const pronWords = matched.pronunciationWords || [];
+    // 한글 모드일 때 혹시라도 남아있을 수 있는 일본어(히라가나/가타카나/한자) 문자 2차 필터링
+    let cleanPronunciation = matched.pronunciation || `(${textClean})`;
+    if (targetLang === 'ko') {
+      cleanPronunciation = cleanPronunciation.replace(/[\u3040-\u30FF\u4E00-\u9FAF]/g, '').replace(/\s+/g, ' ').trim();
+    }
 
-    const wordDetails = segWords.map((w, wIdx) => ({
-      word: w.word.trim(),
-      pronunciation: pronWords[wIdx] || w.word.trim(),
-      start: Number(w.start.toFixed(2)),
-      end: Number(segWords[wIdx + 1] ? segWords[wIdx + 1].start.toFixed(2) : w.end.toFixed(2))
-    }));
+    const segWords = words.filter(w => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15);
+    const pronWords = Array.isArray(matched.pronunciationWords) ? matched.pronunciationWords : [];
+
+    // 단어 개수가 정확히 일치할 때만 단어 단위 매핑 사용 (일본어처럼 글자 단위로 쪼개져 원문이 섞이는 현상 방지)
+    const isWordCountMatched = segWords.length > 0 && segWords.length === pronWords.length;
+
+    const wordDetails = isWordCountMatched
+      ? segWords.map((w, wIdx) => ({
+          word: w.word.trim(),
+          pronunciation: pronWords[wIdx],
+          start: Number(w.start.toFixed(2)),
+          end: Number(segWords[wIdx + 1] ? segWords[wIdx + 1].start.toFixed(2) : w.end.toFixed(2))
+        }))
+      : [];
 
     return {
       start: Number(seg.start.toFixed(2)),
       end: Number(seg.end.toFixed(2)),
       text: textClean,
-      pronunciation: matched.pronunciation || `(${textClean})`,
+      pronunciation: cleanPronunciation,
       translation: matched.translation || textClean,
       words: wordDetails
     };
