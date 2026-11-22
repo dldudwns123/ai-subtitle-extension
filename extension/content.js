@@ -1,4 +1,4 @@
-const SERVER_URL = 'http://localhost:5000';
+const SERVER_URL = 'https://sw-project-r410.onrender.com';
 let currentSubtitles = [];
 let videoElement = null;
 let currentTargetLang = 'ko'; // 기본 발음 언어: 한글

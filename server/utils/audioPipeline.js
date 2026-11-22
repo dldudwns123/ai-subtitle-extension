@@ -6,27 +6,39 @@ const { OpenAI } = require('openai');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// yt-dlp.exe를 이용한 단일 음원 다운로드 및 MP3 변환
+// yt-dlp를 이용한 단일 음원 다운로드 및 MP3 변환 (클라우드 429/403 우회 쿠키 적용)
 async function downloadAudio(videoUrl, outputFileName) {
   return new Promise((resolve, reject) => {
     const tempDir = path.join(__dirname, '../temp');
     if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
 
     const outputPath = path.join(tempDir, `${outputFileName}.mp3`);
-    // 변경 후 (Windows와 Linux 클라우드 서버 모두 호환):
     const ytDlpBinary = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
     const ytDlpPath = path.join(__dirname, '..', ytDlpBinary);
 
+    // Render Secret File(/etc/secrets/cookies.txt) 또는 로컬 cookies.txt 확인
+    const renderCookiePath = '/etc/secrets/cookies.txt';
+    const localCookiePath = path.join(__dirname, '../cookies.txt');
+    const cookiePath = fs.existsSync(renderCookiePath)
+      ? renderCookiePath
+      : (fs.existsSync(localCookiePath) ? localCookiePath : null);
+
     const args = [
       '--no-playlist',
-      '--extractor-args', 'youtube:player_client=android,web',
+      '--extractor-args', cookiePath ? 'youtube:player_client=web,tv' : 'youtube:player_client=android,web',
       '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       '--ffmpeg-location', ffmpegPath,
       '-x',
       '--audio-format', 'mp3',
-      '-o', outputPath,
-      videoUrl
+      '-o', outputPath
     ];
+
+    if (cookiePath) {
+      console.log(`[유튜브 인증 쿠키 적용됨: ${cookiePath}]`);
+      args.push('--cookies', cookiePath);
+    }
+
+    args.push(videoUrl);
 
     console.log('[yt-dlp 음원 추출 시작...]');
     const child = spawn(ytDlpPath, args);
@@ -56,11 +68,9 @@ async function downloadAudio(videoUrl, outputFileName) {
 }
 
 // OpenAI Whisper STT + GPT-4o-mini ID 기반 1:1 정밀 다국어 연음 매핑 파이프라인
-// targetLang: 'ko' (한글), 'en' (영어 알파벳/Romaji), 'ja' (일본어 가타카나)
 async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
   console.log(`[OpenAI Whisper 정밀 음성/단어 타임스탬프 추출 중... (발음 언어: ${targetLang})]`);
-  
-  // 1. Whisper API로 세그먼트 및 단어(word) 단위 타임스탬프 동시 파싱
+
   const transcription = await openai.audio.transcriptions.create({
     file: fs.createReadStream(audioPath),
     model: 'whisper-1',
@@ -74,8 +84,7 @@ async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
   if (segments.length === 0) return [];
 
   console.log(`[GPT-4o-mini ID 매핑 기반 (${targetLang}) 연음 발음 및 뜻 번역 생성 중...]`);
-  
-  // 각 세그먼트에 고유 ID와 포함된 단어 묶음을 부여하여 GPT로 전송
+
   const inputItems = segments.map((s, index) => {
     const segWords = words.filter(w => w.start >= s.start - 0.15 && w.end <= s.end + 0.15);
     return {
@@ -85,7 +94,6 @@ async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
     };
   });
 
-  // targetLang별 프롬프트 발음 규칙 동적 설정
   let langInstruction = '';
   if (targetLang === 'en') {
     langInstruction = `
@@ -94,18 +102,16 @@ async function processAudioToSubtitle(audioPath, targetLang = 'ko') {
    - 예시: "over that" -> pronunciation: "(Over-day)", pronunciationWords: ["Over", "day"]`;
   } else if (targetLang === 'ja') {
     langInstruction = `
-2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 '일본어 가타카나(Katakana)'로 표기하라.
-   - 예시: "over that" -> pronunciation: "(オーバー・デイ)", pronunciationWords: ["オーバー", "デイ"]
-   - 예시: "falling down" -> pronunciation: "(フォーリング・ダウン)", pronunciationWords: ["フォーリング", "ダウン"]`;
+2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 연음/억양 소리 그대로 '일본어 가타카나(Katakana)'로 연결해 표기하라.
+   - 예시: "if I" -> pronunciation: "(イファイ)", pronunciationWords: ["イフ", "アイ"]
+   - 예시: "said I" -> pronunciation: "(セダイ)", pronunciationWords: ["セッ", "ダイ"]`;
   } else {
-    // 기본 한글 발음 ('ko')
     langInstruction = `
 2. pronunciation & pronunciationWords: 사전식 번역 금지. 가수가 실제 발음하는 소리 그대로 오직 '한글(한국어 글자)'로만 작성하라. (원문의 알파벳, 한자, 히라가나 등 외래문자를 단 한 글자도 포함하지 마라)
    - 예시: "始めから" -> pronunciation: "(하지메카라)", pronunciationWords: ["하지메", "카라"]
    - 예시: "over that" -> pronunciation: "(오버데)", pronunciationWords: ["오버", "데"]`;
   }
 
-  // 2. GPT-4o-mini로 ID 기반 1:1 정밀 매핑 및 단어 발음 생성
   const gptResponse = await openai.chat.completions.create({
     model: 'gpt-4o-mini',
     messages: [
@@ -145,8 +151,7 @@ ${langInstruction}
     const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
     const jsonParsed = JSON.parse(jsonMatch ? jsonMatch[0] : rawContent);
     const items = Array.isArray(jsonParsed) ? jsonParsed : (jsonParsed.result || jsonParsed.items || []);
-    
-    // ID 기반 결과 딕셔너리 안전 구성
+
     items.forEach((item) => {
       if (item && item.id !== undefined) {
         resultMap[item.id] = item;
@@ -156,12 +161,10 @@ ${langInstruction}
     console.error('GPT 응답 파싱 실패:', e);
   }
 
-  // 3. ID를 기준으로 원문 세그먼트와 1:1 밀착 결합하여 반환
   return segments.map((seg, idx) => {
     const matched = resultMap[idx] || {};
     const textClean = seg.text.trim();
 
-    // 단어 단위 정밀 타임스탬프 결합
     const segWords = words.filter(w => w.start >= seg.start - 0.15 && w.end <= seg.end + 0.15);
     const pronWords = matched.pronunciationWords || [];
 
