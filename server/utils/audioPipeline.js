@@ -6,7 +6,7 @@ const { OpenAI } = require('openai');
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// yt-dlp를 이용한 단일 음원 다운로드 및 MP3 변환 (클라우드 429/403 우회 쿠키 적용)
+// yt-dlp를 이용한 단일 음원 다운로드 및 MP3 변환 (Node JS 런타임 & 읽기 전용 쿠키 우회 적용)
 async function downloadAudio(videoUrl, outputFileName) {
   return new Promise((resolve, reject) => {
     const tempDir = path.join(__dirname, '../temp');
@@ -16,26 +16,43 @@ async function downloadAudio(videoUrl, outputFileName) {
     const ytDlpBinary = process.platform === 'win32' ? 'yt-dlp.exe' : 'yt-dlp';
     const ytDlpPath = path.join(__dirname, '..', ytDlpBinary);
 
-    // Render Secret File(/etc/secrets/cookies.txt) 또는 로컬 cookies.txt 확인
+    // Render Secret File(/etc/secrets/cookies.txt)은 읽기 전용이므로 쓰기 가능한 temp 폴더로 임시 복사
     const renderCookiePath = '/etc/secrets/cookies.txt';
     const localCookiePath = path.join(__dirname, '../cookies.txt');
-    const cookiePath = fs.existsSync(renderCookiePath)
+    const sourceCookiePath = fs.existsSync(renderCookiePath)
       ? renderCookiePath
       : (fs.existsSync(localCookiePath) ? localCookiePath : null);
 
+    let tempCookiePath = null;
+    if (sourceCookiePath) {
+      tempCookiePath = path.join(tempDir, `cookies_${outputFileName}.txt`);
+      fs.copyFileSync(sourceCookiePath, tempCookiePath);
+    }
+
+    const cleanupTempCookie = () => {
+      if (tempCookiePath && fs.existsSync(tempCookiePath)) {
+        try {
+          fs.unlinkSync(tempCookiePath);
+        } catch (_) {}
+      }
+    };
+
     const args = [
       '--no-playlist',
-      '--extractor-args', cookiePath ? 'youtube:player_client=web,tv' : 'youtube:player_client=android,web',
-      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      '--js-runtimes', `node:${process.execPath}`,
+      '--remote-components', 'ejs:github',
+      '--user-agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
       '--ffmpeg-location', ffmpegPath,
       '-x',
       '--audio-format', 'mp3',
       '-o', outputPath
     ];
 
-    if (cookiePath) {
-      console.log(`[유튜브 인증 쿠키 적용됨: ${cookiePath}]`);
-      args.push('--cookies', cookiePath);
+    if (tempCookiePath) {
+      console.log(`[유튜브 인증 쿠키 적용됨: ${tempCookiePath}]`);
+      args.push('--cookies', tempCookiePath);
+    } else {
+      args.push('--extractor-args', 'youtube:player_client=android,web');
     }
 
     args.push(videoUrl);
@@ -55,6 +72,7 @@ async function downloadAudio(videoUrl, outputFileName) {
     });
 
     child.on('close', (code) => {
+      cleanupTempCookie();
       if (code === 0) {
         console.log('[yt-dlp 음원 추출 완료]');
         resolve(outputPath);
@@ -63,7 +81,10 @@ async function downloadAudio(videoUrl, outputFileName) {
       }
     });
 
-    child.on('error', (err) => reject(err));
+    child.on('error', (err) => {
+      cleanupTempCookie();
+      reject(err);
+    });
   });
 }
 
